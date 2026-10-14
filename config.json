@@ -1,0 +1,12 @@
+{
+  "site_name": "世界时间",
+  "base_url": "https://liaotown.com",
+  "adsense_client": "",
+  "network": [
+    {"name": "汇率换算", "url": "https://718168.com"},
+    {"name": "万年历", "url": "https://rili.718168.com"},
+    {"name": "单位换算", "url": "https://saylian.com"},
+    {"name": "世界时间", "url": "https://liaotown.com"},
+    {"name": "AI开源雷达", "url": "https://ai427.com"}
+  ]
+}
