@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""生成英文版世界时间页面到 dist/en/,并给中英文对应页面互相加上 hreflang 和语言切换链接。
+"""生成英文版世界时间页面到 dist/en/,并给中英文对应页面互相加上 hreflang(含 x-default)和语言切换链接。
 
 需要在 build.py 之后运行;时区计算复用 build.Site。
 """
@@ -9,7 +9,7 @@ import json
 import sys
 from zoneinfo import ZoneInfo
 
-from build import BJ, CLOCK_JS, CSS, OUT, Site, esc, off_str
+from build import BJ, CLOCK_JS, CSS, OUT, Site, esc, ld_html, off_str, validate_output
 from cities import CITIES
 
 EN = {
@@ -62,21 +62,73 @@ class SiteEn(Site):
     def name(self, slug):
         return EN[slug][0]
 
-    def write(self, path, title, desc, body, zh=None):
+    def dst_phrase_en(self, tz):
+        if self.on_dst(tz):
+            return "currently on daylight saving time"
+        if self.observes_dst(tz):
+            return "currently on standard time"
+        return "no daylight saving time"
+
+    def clock_text_en(self, slug):
+        """英文时钟的静态文字。data-tz 脚本会改写成实时时间。"""
+        name, tz = self.name(slug), self.city[slug][2]
+        off = off_str(self.offset(tz))
+        note = self.dst_phrase_en(tz)
+        if slug == "beijing":
+            return f"Beijing time {off}; {note}"
+        minutes = self.minutes(tz) - self.minutes("Asia/Shanghai")
+        if minutes == 0:
+            rel = f"{name} is on the same time as Beijing"
+        else:
+            rel = diff_en(name, "Beijing", minutes)
+        return f"{rel} ({off}; {note})"
+
+    def date_text_en(self, tz):
+        local = self.noon.astimezone(ZoneInfo(tz))
+        return f"{local:%B} {local.day}, {local.year}"
+
+    def city_faqs_en(self, slug):
+        name, tz = self.name(slug), self.city[slug][2]
+        off = off_str(self.offset(tz))
+        if slug == "beijing":
+            return [("How many hours is Beijing ahead of UTC?",
+                     f"Beijing is {hrs(self.minutes(tz))} ahead of UTC ({off}) and does not observe daylight saving time.")]
+        local = self.noon.astimezone(ZoneInfo(tz))
+        tag = {-1: " on the previous day", 1: " on the next day"}.get((local.date() - self.today).days, "")
+        q = f"How many hours is the time difference between {name} and Beijing?"
+        a = f"{self.clock_text_en(slug)}. At 12:00 noon in Beijing, it is {local:%I:%M %p} in {name}{tag}."
+        return [(q, a)]
+
+    def alt_links(self, path, zh):
+        en = f'<link rel="alternate" hreflang="en" href="{esc(self.base + path)}">'
+        if not zh:
+            return en + f'<link rel="alternate" hreflang="x-default" href="{esc(self.base + path)}">'
+        return (f'<link rel="alternate" hreflang="zh-CN" href="{esc(self.base + zh)}">'
+                + en
+                + f'<link rel="alternate" hreflang="x-default" href="{esc(self.base + zh)}">')
+
+    def write(self, path, title, desc, body, zh=None, ld=None):
+        if not ld:
+            raise ValueError(f"missing json-ld for {path}")
         ads = ""
         if self.cfg.get("adsense_client"):
             ads = (f'<script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client='
                    f'{esc(self.cfg["adsense_client"])}" crossorigin="anonymous"></script>')
-        alt = ""
         if zh:
             self.alt[path] = zh
-            alt = (f'<link rel="alternate" hreflang="en" href="{esc(self.base + path)}">'
-                   f'<link rel="alternate" hreflang="zh-CN" href="{esc(self.base + zh)}">'
-                   f'<link rel="alternate" hreflang="x-default" href="{esc(self.base + path)}">')
+        url = self.base + path
+        og = (
+            f'<meta property="og:title" content="{esc(title)}">'
+            f'<meta property="og:description" content="{esc(desc)}">'
+            f'<meta property="og:url" content="{esc(url)}">'
+            f'<meta property="og:type" content="website">'
+            f'<meta property="og:site_name" content="World Time">'
+            f'<meta property="og:locale" content="en_US">'
+        )
         page = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{esc(title)}</title><meta name="description" content="{esc(desc)}">
-<link rel="canonical" href="{esc(self.base + path)}">{alt}{ads}<style>{CSS}</style></head><body>
+<link rel="canonical" href="{esc(url)}">{self.alt_links(path, zh)}{og}{ld_html(ld)}{ads}<style>{CSS}</style></head><body>
 <header><a class="logo" href="/en/">World Time</a><nav><a href="/en/">World Clock</a><a href="/en/converter/">Time Zone Converter</a><a href="/en/dst/">Daylight Saving</a>
 <a href="/en/time/newyork/">New York</a><a href="/en/time/london/">London</a><a href="/en/time/tokyo/">Tokyo</a><a href="{zh or '/'}" hreflang="zh-CN">中文</a></nav></header>
 <main>{body}</main>
@@ -92,6 +144,11 @@ class SiteEn(Site):
         tz, name, y = self.city[slug][2], self.name(slug), self.today.year
         s = self.dst_summary(tz, y)
         if not s:
+            off = off_str(self.offset(tz))
+            if self.on_dst(tz):
+                return f"<p>{esc(name)} is currently on daylight saving time ({off}).</p>"
+            if self.observes_dst(tz):
+                return f"<p>{esc(name)} observes daylight saving time and is currently on standard time ({off}).</p>"
             return f"<p>{esc(name)} does not observe daylight saving time. It stays on {off_str(self.offset(tz))} all year.</p>"
         (t1, o1, n1), (t2, o2, n2) = s
         if t1 < t2:
@@ -126,17 +183,22 @@ class SiteEn(Site):
         others = "".join(f'<a href="/en/time/{c[0]}/">{esc(self.name(c[0]))}</a>' for c in CITIES if c[0] != slug)
         pairs = "".join(f'<a href="/en/difference/{a}-{b}/">{esc(self.name(b if a == slug else a))}</a>'
                         for a, b in itertools.combinations(self.hot_en(), 2) if slug in (a, b))
+        faqs = self.city_faqs_en(slug)
         body = f"""<div class="card"><h1>Current local time in {esc(name)}, {esc(country)}</h1>
-<div class="big" data-tz="{tz}" data-s="1">--:--:--</div><div class="muted" data-tz="{tz}" data-d="1"></div>
+<div class="big" data-tz="{tz}" data-s="1">{esc(self.clock_text_en(slug))}</div><div class="muted" data-tz="{tz}" data-d="1">{esc(self.date_text_en(tz))}</div>
 <p class="muted">Time zone: {tz} · currently {off_str(self.offset(tz))} ({esc(abbr)})</p></div>{self.ad()}
 <div class="card"><h2>Time difference</h2><table>{rows}</table></div>
 <div class="card"><h2>Daylight saving time</h2>{self.dst_en(slug)}</div>
 {'' if slug == 'newyork' else f'<div class="card"><h2>{esc(name)} time vs New York time</h2>{self.hour_table_en(slug, "newyork")}</div>'}
+<div class="card"><h2>FAQ</h2>{self.faq_html(faqs)}</div>
 {f'<div class="card"><h2>Time difference with</h2><div class="links">{pairs}</div></div>' if pairs else ''}
 <div class="card"><h2>Other cities</h2><div class="links">{others}</div></div>"""
         self.write(f"/en/time/{slug}/", f"Current Time in {name}, {country} – {name} Time Zone ({off_str(self.offset(tz))})",
                    f"Current local time in {name}, {country}. Time zone {off_str(self.offset(tz))}, daylight saving dates and time difference with New York, London and more.",
-                   body, f"/city/{slug}/")
+                   body, f"/city/{slug}/", ld=[
+                       self.crumbs([("World Clock", "/en/"), (name, f"/en/time/{slug}/")]),
+                       self.faq_ld(faqs, "en"),
+                   ])
 
     def hot_en(self):
         return ["beijing"] + self.hot()
@@ -147,20 +209,25 @@ class SiteEn(Site):
         zh = f"/diff/{a}-{b}/" if (OUT / "diff" / f"{a}-{b}" / "index.html").exists() else None
         body = f"""<div class="card"><h1>Time difference between {esc(na)} and {esc(nb)}</h1>
 <div class="big">{esc(diff_en(na, nb, d))}</div>
-<p>{esc(na)} now: <b data-tz="{ta}">--:--</b> · {esc(nb)} now: <b data-tz="{tb}">--:--</b></p>
+<p>{esc(na)} now: <b data-tz="{ta}">{esc(self.clock_text_en(a))}</b> · {esc(nb)} now: <b data-tz="{tb}">{esc(self.clock_text_en(b))}</b></p>
 <p class="muted">{esc(na)} {off_str(self.offset(ta))} · {esc(nb)} {off_str(self.offset(tb))} · as of {self.today:%B} {self.today.day}; the difference can change when daylight saving time starts or ends.</p></div>{self.ad()}
 <div class="card"><h2>{esc(na)} to {esc(nb)} time conversion</h2>{self.hour_table_en(a, b)}</div>
 <div class="card"><h2>Daylight saving in {esc(na)}</h2>{self.dst_en(a)}</div>
 <div class="card"><h2>Daylight saving in {esc(nb)}</h2>{self.dst_en(b)}</div>
 <div class="card"><div class="links"><a href="/en/time/{a}/">{esc(na)} time</a><a href="/en/time/{b}/">{esc(nb)} time</a><a href="/en/converter/">Time zone converter</a></div></div>"""
         self.write(f"/en/difference/{a}-{b}/", f"{na} to {nb} Time Difference – {na} vs {nb} Time",
-                   f"{diff_en(na, nb, d)} (as of {self.today:%B} {self.today.day}). Hour-by-hour conversion table and daylight saving dates.", body, zh)
+                   f"{diff_en(na, nb, d)} (as of {self.today:%B} {self.today.day}). Hour-by-hour conversion table and daylight saving dates.", body, zh,
+                   ld=[self.crumbs([("World Clock", "/en/"), (f"{na} and {nb}", f"/en/difference/{a}-{b}/")])])
 
     def home_en(self):
-        clocks = "".join(f'<a href="/en/time/{c[0]}/"><small>{esc(self.name(c[0]))}</small><b data-tz="{c[2]}">--:--</b><small>{off_str(self.offset(c[2]))}</small></a>' for c in CITIES)
+        clocks = "".join(
+            f'<a href="/en/time/{c[0]}/"><small>{esc(self.name(c[0]))}</small><b data-tz="{c[2]}">{esc(self.clock_text_en(c[0]))}</b><small>{off_str(self.offset(c[2]))}</small></a>'
+            for c in CITIES)
+        desc = "Live world clock with the current local time in New York, London, Tokyo, Sydney and other major cities, plus time zone differences."
         body = f"""<div class="card"><h1>World Clock – Current Time Around the World</h1><p class="muted">Live local time in {len(CITIES)} major cities, with time differences and daylight saving dates.</p></div>{self.ad()}
 <div class="card"><div class="clocks">{clocks}</div></div>"""
-        self.write("/en/", "World Clock – Current Local Time in Cities Worldwide", "Live world clock with the current local time in New York, London, Tokyo, Sydney and other major cities, plus time zone differences.", body, "/")
+        self.write("/en/", "World Clock – Current Local Time in Cities Worldwide", desc, body, "/",
+                   ld=self.home_ld(desc, name="World Time", url=self.base + "/en/", lang="en"))
 
     def dst_en_page(self):
         y = self.today.year
@@ -169,7 +236,8 @@ class SiteEn(Site):
         body = f"""<div class="card"><h1>Daylight Saving Time {y}: Start and End Dates</h1><p>Clocks go forward one hour in spring and back in autumn. In the Northern Hemisphere DST usually starts in March and ends in October or November; in the Southern Hemisphere (Sydney, Auckland) it is the reverse.</p></div>{self.ad()}
 <div class="card"><table><tr><th>City</th><th>Starts (local)</th><th>Ends (local)</th></tr>{rows}</table>
 <p class="muted">For Southern Hemisphere cities, "Starts" is the period beginning late in {y} and "Ends" is the period that began the previous year.</p></div>"""
-        self.write("/en/dst/", f"Daylight Saving Time {y} – When Does DST Start and End?", f"{y} daylight saving time start and end dates for the US, UK, Europe, Australia and New Zealand.", body, "/dst/")
+        self.write("/en/dst/", f"Daylight Saving Time {y} – When Does DST Start and End?", f"{y} daylight saving time start and end dates for the US, UK, Europe, Australia and New Zealand.", body, "/dst/",
+                   ld=[self.crumbs([("World Clock", "/en/"), (f"Daylight Saving {y}", "/en/dst/")])])
 
     def converter_en(self):
         opts = "".join(f'<option value="{c[2]}"{" selected" if c[0] == "newyork" else ""}>{esc(self.name(c[0]))}</option>' for c in CITIES)
@@ -184,7 +252,8 @@ var n=parts(new Date(),z.value);t.value=n.year+'-'+n.month+'-'+n.day+'T'+n.hour+
         body = f"""<div class="card"><h1>Time Zone Converter</h1><p class="muted">Pick a city and a local time to see the same moment around the world. Daylight saving time is handled automatically.</p>
 <div class="form"><label>City<select id="z">{opts}</select></label><label>Local time<input id="t" type="datetime-local"></label></div></div>{self.ad()}
 <div class="card"><table><tr><th>City</th><th>Local time</th></tr><tbody id="o"></tbody></table></div>{js}"""
-        self.write("/en/converter/", "Time Zone Converter – Convert Time Between Cities", "Convert a time in one city to local times worldwide, with daylight saving time handled automatically.", body, "/converter/")
+        self.write("/en/converter/", "Time Zone Converter – Convert Time Between Cities", "Convert a time in one city to local times worldwide, with daylight saving time handled automatically.", body, "/converter/",
+                   ld=[self.crumbs([("World Clock", "/en/"), ("Time Zone Converter", "/en/converter/")])])
 
     def link_chinese(self):
         for en, zh in self.alt.items():
@@ -192,8 +261,12 @@ var n=parts(new Date(),z.value);t.value=n.year+'-'+n.month+'-'+n.day+'T'+n.hour+
             s = f.read_text(encoding="utf-8")
             if 'hreflang="en"' in s:
                 continue  # 一个中文页只关联一个英文页
-            s = s.replace("<style>", f'<link rel="alternate" hreflang="zh-CN" href="{esc(self.base + zh)}">'
-                                     f'<link rel="alternate" hreflang="en" href="{esc(self.base + en)}"><style>', 1)
+            if "<!--hreflang-->" not in s:
+                raise SystemExit(f"missing hreflang slot: {zh}")
+            alt = (f'<link rel="alternate" hreflang="zh-CN" href="{esc(self.base + zh)}">'
+                   f'<link rel="alternate" hreflang="en" href="{esc(self.base + en)}">'
+                   f'<link rel="alternate" hreflang="x-default" href="{esc(self.base + zh)}">')
+            s = s.replace("<!--hreflang-->", alt, 1)
             s = s.replace("</nav></header>", f'<a href="{self.prefix}{en}" hreflang="en">English</a></nav></header>', 1)
             f.write_text(s, encoding="utf-8")
 
@@ -211,6 +284,7 @@ var n=parts(new Date(),z.value);t.value=n.year+'-'+n.month+'-'+n.day+'T'+n.hour+
         extra = "".join(f"<url><loc>{esc(self.base + u)}</loc><lastmod>{self.today}</lastmod></url>" for u in self.urls)
         sm.write_text(sm.read_text(encoding="utf-8").replace("</urlset>", extra + "</urlset>"), encoding="utf-8")
         print(f"英文页面 {len(self.urls)} 个,其中 {len(self.alt)} 个有对应中文页")
+        validate_output(require_hreflang=True)
 
 
 if __name__ == "__main__":
